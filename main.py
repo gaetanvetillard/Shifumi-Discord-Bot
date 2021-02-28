@@ -1,15 +1,46 @@
 from asyncio.tasks import wait
 from gc import DEBUG_SAVEALL
+from typing import final
 import discord
 import random
 import time
 import asyncio
-
 from discord.message import convert_emoji_reaction
+from sqlalchemy import create_engine, Table, Column, Integer, Float, MetaData, select, desc 
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.sql.functions import user
+
+
+#DATABASE TABLE
+
+engine = create_engine('sqlite:///leaderboard.db')
+db = declarative_base()
+Session = sessionmaker(bind=engine)
+session = Session()
+
+class Leaderboard(db):
+    __tablename__ = 'leaderboard'
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer)
+    wins = Column(Integer)
+    loses = Column(Integer)
+    winrate = Column(Float)
+    score = Column(Integer)
+
+    def __repr__(self):
+        return "<User(user_id='%s', wins='%s', loses='%s', winrate='%s')>" % (self.user_id, self.wins, self.loses, self.winrate)
+
+db.metadata.create_all(engine)
+
+
 
 CHOICE = ["🤚", "👊","✌"]
 YES_NO = ["✅", "❌"]
-DISCORD_BOT_TOKEN = "YOUR DISCORD BOT TOKEN"
+DISCORD_BOT_TOKEN = "ODE0MTcwMjMzNjU5OTgxOTA0.YDZ9Hg.GlZAV38vf7ZhY4tDDSVsq7jOgNI"
+
+
 
 def get_random_choice():
     """This function return a random choice for the bot"""
@@ -19,34 +50,71 @@ def get_random_choice():
 def check(reaction, user):
     return reaction, user
 
-def how_has_won(host_choice, host_mention, opponent_choice, opponent_mention, game_mode):
-    """This function return a string with the result"""
+def who_has_won(host_choice, host_mention, opponent_choice, opponent_mention, game_mode, host_id, opponent_id=814170233659981904):
+    """This function return a tuple with string with the result, winner id, loser id """
 
     if game_mode == "vs":
         if host_choice == opponent_choice:
-            return "Draw ! Game will restart again soon..."
+            return "Draw ! Game will restart again soon...", None, None
         elif host_choice == "🤚" and opponent_choice == "👊":
-            return f"🎉 {host_mention} has won ! 🎉"
+            return f"🎉 {host_mention} has won ! 🎉", host_id, opponent_id
         elif host_choice == "👊" and opponent_choice == "✌":
-            return f"🎉 {host_mention} has won ! 🎉"
+            return f"🎉 {host_mention} has won ! 🎉", host_id, opponent_id
         elif host_choice == "✌" and opponent_choice == "🤚":
-            return f"🎉 {host_mention} has won ! 🎉"
+            return f"🎉 {host_mention} has won ! 🎉", host_id, opponent_id
         else:
-            return f"🎉 {opponent_mention} has won ! 🎉"
+            return f"🎉 {opponent_mention} has won ! 🎉", opponent_id, host_id
     elif game_mode == "solo":
         if host_choice == opponent_choice:
-            return "Draw ! Game will restart again soon..."
+            return "Draw ! Game will restart again soon...", None, None
         elif host_choice == "🤚" and opponent_choice == "👊":
-            return f"🎉 {host_mention} has won ! 🎉"
+            return f"🎉 {host_mention} has won ! 🎉", host_id, opponent_id
         elif host_choice == "👊" and opponent_choice == "✌":
-            return f"🎉 {host_mention} has won ! 🎉"
+            return f"🎉 {host_mention} has won ! 🎉", host_id, opponent_id
         elif host_choice == "✌" and opponent_choice == "🤚":
-            return f"🎉^{host_mention} has won ! 🎉"
+            return f"🎉^{host_mention} has won ! 🎉", host_id, opponent_id
         else:
-            return f"Sorry, I won. Try again :)"
+            return f"Sorry, I won. Try again :)", opponent_id, host_id
 
+def add_result_to_leaderboard(winner_id:int, loser_id:int):
+    #WINNER :
+    winner = session.query(Leaderboard).filter_by(user_id=winner_id).first()
+    if winner == None:
+        new_user = Leaderboard(
+            user_id=winner_id,
+            wins=1,
+            loses=0,
+            winrate=100.0,
+            score=10,
+        )
+        session.add(new_user)
+    else:
+        winner.winrate = round((winner.wins + 1) / (winner.loses + winner.wins + 1), 1) * 100
+        winner.wins += 1
+        winner.score += 10
+    
+    #LOSER
+    loser = session.query(Leaderboard).filter_by(user_id=loser_id).first()
+    if loser == None:
+        new_user = Leaderboard(
+            user_id=loser_id,
+            wins=0, 
+            loses=1,
+            winrate=0.0,
+            score=0,
+        )
+        session.add(new_user)
+    else:
+        loser.winrate = round(loser.wins / (loser.loses + 1), 1) * 100
+        loser.loses += 1
+        if loser.score != 0:
+            loser.score -= 5
+    session.commit()
 
-client = discord.Client(activity=discord.Game("$start to start the game"),)
+    return
+
+#DISCORD PART
+client = discord.Client(activity=discord.Game("$start to start the game"))
 
 
 
@@ -136,6 +204,7 @@ async def on_message(message):
 
             else:
                 game_end = False
+                out_of_time = False
                 while not game_end:
                     await bot_msg.clear_reactions()
                     decount_until_start = 4
@@ -165,37 +234,33 @@ async def on_message(message):
                             def check_test(reaction, user):
                                 return str(reaction) in CHOICE and user.id == host.id or user.id == opponent_id
 
-                            first_timer = 0
-                            while first_timer <= 5:
+                            while not out_of_time:
                                 try:
-                                    reaction_1st, user_1st = await client.wait_for('reaction_add', timeout=0.005, check=check_test)
+                                    reaction_1st, user_1st = await client.wait_for('reaction_add', timeout=3, check=check_test)
                                     if str(reaction_1st) in CHOICE:
                                         if user_1st.id == host.id:
                                             host_choice = str(reaction_1st)
                                         elif user_1st.id == opponent_id:
                                             opponent_choice = str(reaction_1st)
-                                    second_timer = 0
-                                    while second_timer <= 2:
-                                        try:
-                                            reaction_2nd, user_2nd = await client.wait_for('reaction_add', timeout=0.005, check=check_test)
-                                            if str(reaction_2nd) in CHOICE:
-                                                if user_2nd.id == host.id:
-                                                    host_choice = str(reaction_2nd)
-                                                elif user_2nd.id == opponent_id:
-                                                    opponent_choice = str(reaction_2nd)
-                                                
-                                                #If Draw : End game    
-                                                if str(reaction_1st) != str(reaction_2nd):
-                                                    game_end = True
-                                            break
-                                        except asyncio.TimeoutError:
-                                            second_timer =+ 0.005
-                                    break
+                                    try:
+                                        reaction_2nd, user_2nd = await client.wait_for('reaction_add', timeout=2, check=check_test)
+                                        if str(reaction_2nd) in CHOICE:
+                                            if user_2nd.id == host.id:
+                                                host_choice = str(reaction_2nd)
+                                            elif user_2nd.id == opponent_id:
+                                                opponent_choice = str(reaction_2nd)
+                                            
+                                            #If Draw : End game    
+                                            if str(reaction_1st) != str(reaction_2nd):
+                                                game_end = True
+                                        break
+                                    except asyncio.TimeoutError:
+                                        out_of_time = True
                                 except asyncio.TimeoutError:
-                                    first_timer += 0.005
+                                    out_of_time = True
 
 
-                            if first_timer >= 5:
+                            if out_of_time:
                                 await bot_msg.clear_reactions()
                                 embed = discord.Embed(title=f"Shifumi Match Has Expired", description=f"Too slow, nobody has won.")
                                 embed.set_footer(text=f"Host : {host}", icon_url=host.avatar_url)
@@ -204,10 +269,16 @@ async def on_message(message):
 
                             else:
                                 await bot_msg.clear_reactions()
-                                result = how_has_won(host_choice, host_mention, opponent_choice, opponent_mention, "vs")
+                                result, winner_id, loser_id = who_has_won(host_choice, host_mention, opponent_choice, opponent_mention, "vs", int(host.id), int(opponent_id))
+
                                 embed = discord.Embed(title=f"Shifumi Match Result", description=f"{result}\n------------------------------\n{host_mention} : {host_choice}\n{opponent_mention} : {opponent_choice}")
                                 embed.set_footer(text=f"Host : {host}", icon_url=host.avatar_url)
                                 await bot_msg.edit(embed=embed)
+                          
+                                #ADD RESULT TO DATABASE IF NOT DRAW
+                                if winner_id != None and loser_id != None:
+                                    add_result_to_leaderboard(winner_id, loser_id)
+
                                 if game_end:
                                     return
                                 else:
@@ -271,10 +342,16 @@ async def on_message(message):
 
                         if str(host_choice) != str(bot_choice):
                             game_end = True
-                        result = how_has_won(str(host_choice), host_mention, bot_choice, "Bot", "solo")
+                        result, winner_id, loser_id = who_has_won(str(host_choice), host_mention, bot_choice, "Bot", "solo", int(host.id))
+
                         embed = discord.Embed(title=f"Shifumi Match Result", description=f"{result}\n------------------------------\n{host_mention} : {host_choice}\n{client.user.mention} : {bot_choice}")
                         embed.set_footer(text=f"Player : {host}", icon_url=host.avatar_url)
                         await bot_msg.edit(embed=embed)
+                        
+                        #ADD RESULT TO DATABASE IF NOT DRAW
+                        if winner_id != None and loser_id != None:
+                            add_result_to_leaderboard(winner_id, loser_id)
+
                         if game_end:
                             return
 
@@ -285,5 +362,46 @@ async def on_message(message):
                         await bot_msg.edit(embed=embed)
                         return
             
+
+    elif message.content.startswith("$leaderboard"):
+        final_str = ""
+        placement = 1
+        all_players = session.query(Leaderboard).order_by(desc(Leaderboard.score)).all()
+        for player in all_players:
+            final_str += f"{placement}. <@!{player.user_id}> : {player.score} :coin:\n"
+            placement += 1
+        embed = discord.Embed(title=f"Shifumi Leaderboard",description=f"**{final_str}**")
+        embed.set_footer(text=f"Request by : {host}", icon_url=host.avatar_url)   
+        await channel.send(embed=embed)
+
+
+    elif message.content.startswith("$stats"):
+        if "<@" in message.content:
+            try:
+                user_id = int(message.content.split("!")[1].split('>')[0])
+                user_mention = f"<@!{user_id}>"
+            except IndexError:
+                user_id = int(message.content.split("@")[1].split('>')[0])
+                user_mention = f"<@!{user_id}>"
+        
+        else:
+            user_id = host.id
+            user_mention = host_mention
+        
+        user_stats = session.query(Leaderboard).filter_by(user_id=user_id).first()
+        if user_stats != None:
+            embed = discord.Embed(title=f"Shifumi Stats",description=f"**Stats of {user_mention}**\
+                \n__Matches__ : {user_stats.wins + user_stats.loses}\
+                \n__Wins__ : {user_stats.wins}\
+                \n__Loses__ : {user_stats.loses}\
+                \n__Winrate__ : {user_stats.winrate} %\
+                \n__Score__ : {user_stats.score} :coin:")
+            embed.set_footer(text=f"Request by : {host}", icon_url=host.avatar_url)   
+            await channel.send(embed=embed)
+
+        else:
+            embed = discord.Embed(title=f"Shifumi Stats",description=f"**User don't have stats**")
+            embed.set_footer(text=f"Request by : {host}", icon_url=host.avatar_url)
+            await channel.send(embed=embed)
 
 client.run(DISCORD_BOT_TOKEN)
